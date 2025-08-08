@@ -2,10 +2,10 @@
 # Copyright(c) 2010-2014 Intel Corporation
 
 # binary name
-APP = iot_app
+APP = fpe_app
 
 # all source are stored in SRCS-y
-SRCS-y := iot_multicore.c
+SRCS-y := fpe_multicore.c
 
 PKGCONF ?= pkg-config
 
