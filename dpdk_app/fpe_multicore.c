@@ -359,10 +359,6 @@ static void print_hex(const char *label, const uint8_t *b, size_t n) {
     for (size_t i = 0; i < n; i++) printf("%02x", b[i]);
     printf("\n");
 }
-#if defined(__aarch64__)
-unsigned long caps = getauxval(AT_HWCAP);
-if ((caps & HWCAP_AES) == 0) { printf("... lacks AES ...\n"); return 0; }
-#endif
 // Known-answer test from FIPS-197:
 // Key:        000102030405060708090a0b0c0d0e0f
 // Plaintext:  00112233445566778899aabbccddeeff
@@ -394,7 +390,6 @@ static int aes_selftest_neon(void) {
     print_hex("AES-128 EXP: ", expect, 16);
     printf("AES-128 NEON selftest: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : -1;
-#endif
 }
 
 // End of encryption functions
