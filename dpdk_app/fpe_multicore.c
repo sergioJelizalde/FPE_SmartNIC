@@ -51,13 +51,14 @@
  #include <rte_flow.h>
  
  //for bluefield2
- #include <arm_neon.h>
 
-//#include "mlp_8.h"
-//#include "mlp_32.h"
-#include "mlp_64_32.h"
-//#include "mlp_128_64_32.h"
-//#include "mlp_256_128_64_32.h"
+#include <arm_neon.h>
+
+#if defined(__aarch64__)
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
+#endif
+
 
 #define RX_RING_SIZE 1024
 #define TX_RING_SIZE 1024
@@ -92,8 +93,6 @@ struct worker_args {
     struct rte_mempool *mbuf_pool;
     struct rte_hash    *flow_table;
     struct flow_entry  *flow_pool; 
-    float              *buf_a;
-    float              *buf_b;
     uint16_t            queue_id;    
     uint32_t            next_free;
     uint16_t port_id;
@@ -286,115 +285,119 @@ get_hw_timestamp(const struct rte_mbuf *mbuf)
 // End of HW timetamps
 
 
-// Fast piecewise sigmoid approximation
-static inline float fast_sigmoid(float x) {
-    if (x <= -4.0f) return 0.0f;
-    else if (x <= -2.0f) return 0.0625f * x + 0.25f;
-    else if (x <= 0.0f)  return 0.125f * x + 0.5f;
-    else if (x <= 2.0f)  return -0.125f * x + 0.5f;
-    else if (x <= 4.0f)  return -0.0625f * x + 0.75f;
-    else return 1.0f;
-}
+// Starting encryption functions ------------------------------------------------
+#ifdef USE_ARM_AES
+#include <arm_neon.h>
+#endif
 
-// Scalar MLP (arbitrary layers)
-static int predict_mlp_c_general(const float *in_features,
-                                 float *buf_a, float *buf_b) {
-    float *in_buf  = buf_a, *out_buf = buf_b;
+// ---------- AES-128 key schedule (portable C) ----------
+static void aes128_key_expand(const uint8_t key[16], uint8_t round_keys[176]) {
+    static const uint8_t rcon[10] =
+        {0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1B,0x36};
 
-    memcpy(in_buf, in_features, LAYER_SIZES[0] * sizeof(float));
+    memcpy(round_keys, key, 16);
+    uint8_t t[4];
+    for (int i = 16, r = 0; i < 176; i += 4) {
+        t[0] = round_keys[i - 4];
+        t[1] = round_keys[i - 3];
+        t[2] = round_keys[i - 2];
+        t[3] = round_keys[i - 1];
 
-    for (int L = 0; L < NUM_LAYERS; L++) {
-        int size_in   = LAYER_SIZES[L];
-        int size_out  = LAYER_SIZES[L+1];
-        int is_output = (L == NUM_LAYERS - 1);
-
-        const float *W = WEIGHTS[L];
-        const float *B = BIASES[L];
-
-        for (int j = 0; j < size_out; j++) {
-            float acc = B[j];
-            for (int k = 0; k < size_in; k++)
-                acc += W[k*size_out + j] * in_buf[k];
-            out_buf[j] = is_output
-                       ? fast_sigmoid(acc)
-                       : (acc > 0.0f ? acc : 0.0f);
+        if (i % 16 == 0) {
+            // RotWord
+            uint8_t tmp = t[0]; t[0]=t[1]; t[1]=t[2]; t[2]=t[3]; t[3]=tmp;
+            // SubWord (AES S-box)
+            static const uint8_t sbox[256] = {
+                0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+                0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+                0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+                0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+                0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+                0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+                0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+                0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+                0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+                0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+                0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+                0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+                0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+                0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+                0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+                0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+            };
+            t[0] = sbox[t[0]]; t[1] = sbox[t[1]]; t[2] = sbox[t[2]]; t[3] = sbox[t[3]];
+            t[0] ^= rcon[r++];
         }
 
-        // swap buffers
-        float *tmp = in_buf; in_buf = out_buf; out_buf = tmp;
-    }
-
-    // argmax
-    int final_size = LAYER_SIZES[NUM_LAYERS], best = 0;
-    float best_v = in_buf[0];
-    for (int i = 1; i < final_size; i++) {
-        if (in_buf[i] > best_v) {
-            best_v = in_buf[i];
-            best   = i;
-        }
-    }
-    float score = in_buf[0];
-    return (score > 0.5f) ? 1 : 0;
-}
-
-// -------------------------------------------------------------------------
-// NEON‐vectorized layer
-static void layer_forward_neon(const float *W, const float *B,
-                               const float *in, float *out,
-                               int size_in, int size_out,
-                               int is_output) {
-    int j = 0;
-    for (; j + 4 <= size_out; j += 4) {
-        float32x4_t acc = vld1q_f32(&B[j]);
-        for (int k = 0; k < size_in; k++) {
-            acc = vfmaq_f32(acc,
-                            vdupq_n_f32(in[k]),
-                            vld1q_f32(&W[k*size_out + j]));
-        }
-        if (!is_output)  acc = vmaxq_f32(acc, vdupq_n_f32(0.0f));
-        vst1q_f32(&out[j], acc);
-    }
-    // tail scalar in case the model does not align to multiple of 4
-    for (; j < size_out; j++) {
-        float a = B[j];
-        for (int k = 0; k < size_in; k++)
-            a += W[k*size_out + j] * in[k];
-        out[j] = is_output ? a : (a > 0.0f ? a : 0.0f);
-    }
-    if (is_output) {
-        for (int i = 0; i < size_out; i++)
-            out[i] = fast_sigmoid(out[i]);
+        round_keys[i + 0] = round_keys[i - 16] ^ t[0];
+        round_keys[i + 1] = round_keys[i - 15] ^ t[1];
+        round_keys[i + 2] = round_keys[i - 14] ^ t[2];
+        round_keys[i + 3] = round_keys[i - 13] ^ t[3];
     }
 }
 
-// NEON MLP over arbitrary layers
-static int predict_mlp(const float *in_features, float *buf_a, float *buf_b) {
-
-    float *in_buf  = buf_a, *out_buf = buf_b;
-    memcpy(in_buf, in_features, LAYER_SIZES[0] * sizeof(float));
-    //printf("entering prediction");
-    for (int L = 0; L < NUM_LAYERS; L++) {
-        layer_forward_neon(
-          WEIGHTS[L], BIASES[L],
-          in_buf, out_buf,
-          LAYER_SIZES[L],
-          LAYER_SIZES[L+1],
-          (L == NUM_LAYERS - 1)
-        );
-        float *tmp = in_buf; in_buf = out_buf; out_buf = tmp;
+// ---------- AES-128 encrypt 1 block with ARMv8 Crypto Extensions ----------
+#ifdef USE_ARM_AES
+static inline void aes128_encrypt_block_neon(const uint8_t in[16],
+                                             const uint8_t rk_bytes[176],
+                                             uint8_t out[16]) {
+    const uint8x16_t *rk = (const uint8x16_t *)rk_bytes;
+    uint8x16_t x = veorq_u8(vld1q_u8(in), rk[0]);
+    for (int r = 1; r < 10; r++) {
+        x = vaeseq_u8(x, vdupq_n_u8(0));
+        x = vaesmcq_u8(x);
+        x = veorq_u8(x, rk[r]);
     }
-    //printf("inference");
-    // argmax
-    int final_size = LAYER_SIZES[NUM_LAYERS], best = 0;
-    float best_v = in_buf[0];
-    for (int i = 1; i < final_size; i++) {
-        if (in_buf[i] > best_v) {
-            best_v = in_buf[i];
-            best   = i;
-        }
-    }
-    return best;
+    x = vaeseq_u8(x, vdupq_n_u8(0));     // final SubBytes+ShiftRows
+    x = veorq_u8(x, rk[10]);              // final AddRoundKey (no MixColumns)
+    vst1q_u8(out, x);
 }
+#endif
+
+static void print_hex(const char *label, const uint8_t *b, size_t n) {
+    printf("%s", label);
+    for (size_t i = 0; i < n; i++) printf("%02x", b[i]);
+    printf("\n");
+}
+#if defined(__aarch64__)
+unsigned long caps = getauxval(AT_HWCAP);
+if ((caps & HWCAP_AES) == 0) { printf("... lacks AES ...\n"); return 0; }
+#endif
+// Known-answer test from FIPS-197:
+// Key:        000102030405060708090a0b0c0d0e0f
+// Plaintext:  00112233445566778899aabbccddeeff
+// Ciphertext: 69c4e0d86a7b0430d8cdb78070b4c55a
+static int aes_selftest_neon(void) {
+
+    const uint8_t key[16] = {
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+        0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f
+    };
+    const uint8_t pt[16] = {
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
+        0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff
+    };
+    const uint8_t expect[16] = {
+        0x69,0xc4,0xe0,0xd8,0x6a,0x7b,0x04,0x30,
+        0xd8,0xcd,0xb7,0x80,0x70,0xb4,0xc5,0x5a
+    };
+
+    uint8_t rk[176];
+    aes128_key_expand(key, rk);
+
+    uint8_t ct[16];
+    aes128_encrypt_block_neon(pt, rk, ct);
+
+    int ok = (memcmp(ct, expect, 16) == 0);
+    print_hex("AES-128 PT : ", pt, 16);
+    print_hex("AES-128 CT : ", ct, 16);
+    print_hex("AES-128 EXP: ", expect, 16);
+    printf("AES-128 NEON selftest: %s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : -1;
+#endif
+}
+
+// End of encryption functions
 //--------------------------------------------------------------------------
 
 static inline uint32_t
@@ -529,9 +532,6 @@ handle_packet(struct flow_key   *key,
             (float)e->flag_bits_sum
         };
 
-        int pred = predict_mlp(features, w->buf_a, w->buf_b);
-        //int pred = predict_mlp_c_general(features, w->buf_a, w->buf_b);
-
         // cleanup flows
         //rte_hash_del_key(w->flow_table, key);
         reset_entry_per_core(w, index);
@@ -653,7 +653,8 @@ static struct worker_args worker_args[MAX_CORES];
                         // int prediction = predict_mlp(features);
                         // uint64_t start_cycles = rte_rdtsc_precise();
 
-                        handle_packet(&key, pkt_len, pkt_time, flags_count, w);
+                        //handle_packet(&key, pkt_len, pkt_time, flags_count, w);
+    
                         // uint64_t end_cycles = rte_rdtsc_precise();
                         // uint64_t inference_cycles = end_cycles - start_cycles;
 
@@ -738,24 +739,6 @@ static struct worker_args worker_args[MAX_CORES];
  
 
 
-/*
-// signal handler 
- static void sigint_handler(int signo) {
-    FILE *f = fopen("latencies.csv", "w");
-    if (!f) {
-        perror("fopen");
-        exit(1);
-    }
-    fprintf(f, "sample,cycles\n");
-    for (size_t i = 0; i < latency_count; i++) {
-        fprintf(f, "%zu,%lu\n", i, latency_cycles[i]);
-    }
-    fclose(f);
-    printf("Wrote %zu samples to latencies.csv\n", latency_count);
-    exit(0);
-}
-*/
-
 
  /* Initialization of Environment Abstraction Layer (EAL). 8< */
  int main(int argc, char **argv)
@@ -771,20 +754,6 @@ static struct worker_args worker_args[MAX_CORES];
      ret = rte_eal_init(argc, argv);
      if (ret < 0)
          rte_panic("Cannot init EAL\n");
-
-
-
-    /*
-    latency_cycles = malloc(sizeof(*latency_cycles) * MAX_SAMPLES);
-    if (!latency_cycles)
-        rte_exit(EXIT_FAILURE, "malloc failed\n");
-
-    // install SIGINT handler before you start lcore_main
-    struct sigaction sa = {
-        .sa_handler = sigint_handler,
-    };
-    sigaction(SIGINT, &sa, NULL);
-    */
 
 
 
@@ -834,13 +803,10 @@ static struct worker_args worker_args[MAX_CORES];
          printf("port %u initialized\n",portid);
      };
 
-     // find maximum neurons 
-        int max_neurons = 0;
-        for (int i = 0; i <= NUM_LAYERS; i++)
-            if (LAYER_SIZES[i] > max_neurons)
-                max_neurons = LAYER_SIZES[i];
 
-
+    if (aes_selftest_neon() != 0) {
+    rte_exit(EXIT_FAILURE, "AES NEON selftest failed — check -march/+crypto and CPU support\n");
+    }
     
     
     uint16_t queue_id = 0;
@@ -859,12 +825,6 @@ static struct worker_args worker_args[MAX_CORES];
         // 2) Per-core state
         w->next_free  = 0;            // start allocating at slot 0
         w->queue_id   = queue_id++;   // one RX queue per core
-
-        // 3) Scratch buffers for NEON inference
-        if (posix_memalign((void**)&w->buf_a, 16, max_neurons * sizeof(float)) ||
-            posix_memalign((void**)&w->buf_b, 16, max_neurons * sizeof(float))) {
-            rte_exit(EXIT_FAILURE, "posix_memalign failed for core %u\n", core_id);
-        }
 
         // 4) Launch worker on that core (skip core 0 if you plan to use it as master below)
         if (core_id != rte_get_main_lcore()) {
