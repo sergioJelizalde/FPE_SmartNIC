@@ -4,6 +4,8 @@
 // Build: clang -O3 -march=armv8-a+crypto -std=c11 ff1_aes_neon.c -o ff1
 
 #include <stdint.h>
+#include <sys/types.h>  // for ssize_t
+#include <alloca.h>     // for alloca()
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
