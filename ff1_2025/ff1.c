@@ -379,6 +379,8 @@ int main(void){
     uint32_t C[sizeof(X)/sizeof(X[0])];
     uint32_t P2[sizeof(X)/sizeof(X[0])];
 
+    const uint64_t hz = rte_get_tsc_hz();
+
     uint64_t t0 = rte_rdtsc_precise();
     if (ff1_encrypt_aes_neon(&params, K, tweak, sizeof(tweak)-1, X, n, C)!=0) {
         puts("encrypt failed"); return 1;
@@ -392,7 +394,7 @@ int main(void){
     }
     t1 = rte_rdtsc_precise();
     double ns_dec = (double)(t1 - t0) * 1e9 / hz;
-    fprintf(out, "%d,%.2f,%.2f\n", it, ns_enc, ns_dec);
+    fprintf(out, "%.2f,%.2f\n", ns_enc, ns_dec);
 
     printf("PT : "); print_digits(X,n);
     printf("CT : "); print_digits(C,n);
