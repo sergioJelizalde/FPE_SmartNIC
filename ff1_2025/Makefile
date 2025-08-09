@@ -5,7 +5,7 @@
 APP = fpe_app
 
 # all source are stored in SRCS-y
-SRCS-y := fpe_multicore.c
+SRCS-y := ff1.c
 
 PKGCONF ?= pkg-config
 
