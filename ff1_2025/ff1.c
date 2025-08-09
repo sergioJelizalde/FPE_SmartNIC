@@ -394,7 +394,7 @@ int main(void){
     }
     t1 = rte_rdtsc_precise();
     double ns_dec = (double)(t1 - t0) * 1e9 / hz;
-    fprintf(out, "%.2f,%.2f\n", ns_enc, ns_dec);
+    fprintf("\n%.2f,%.2f\n", ns_enc, ns_dec);
 
     printf("PT : "); print_digits(X,n);
     printf("CT : "); print_digits(C,n);
