@@ -3,13 +3,17 @@
 // Encrypt + Decrypt; AES-128 via ARMv8 AES/NEON.
 // Build: clang -O3 -march=armv8-a+crypto -std=c11 ff1_aes_neon.c -o ff1
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <inttypes.h>
 
 #include <sys/types.h>  // for ssize_t
 #include <alloca.h>     // for alloca()
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
+
 #include <arm_neon.h>
+#include <rte_eal.h>
 #include <rte_cycles.h>
 // ---------------- AES-128 key schedule (portable) ----------------
 static void aes128_key_expand(const uint8_t key[16], uint8_t rk[176]) {
@@ -379,7 +383,7 @@ int main(void){
     uint32_t C[sizeof(X)/sizeof(X[0])];
     uint32_t P2[sizeof(X)/sizeof(X[0])];
 
-    double hz = rte_get_tsc_hz();
+    uint64_t hz = rte_get_tsc_hz();
 
     uint64_t t0 = rte_rdtsc_precise();
     if (ff1_encrypt_aes_neon(&params, K, tweak, sizeof(tweak)-1, X, n, C)!=0) {
