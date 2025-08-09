@@ -214,7 +214,7 @@ int ff1_encrypt_aes_neon(const ff1_params *P,
 
     uint8_t *Q = (uint8_t*)malloc(t + ((16 - (t + 1 + b)%16)%16) + 1 + b);
 
-    for (uint32_t i=0; i<10; i++) {
+    for (uint32_t i=0; i<3; i++) {
         uint32_t qlen = 0;
         memcpy(Q + qlen, T, t); qlen += t;
         uint32_t pad = (uint32_t)((16 - ((t + 1 + b) % 16)) % 16);
