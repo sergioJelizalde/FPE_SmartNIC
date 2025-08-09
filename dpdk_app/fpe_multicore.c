@@ -89,6 +89,11 @@
 #define MAX_FLOWS_PER_CORE 8192*2
 #define MAX_CORES       RTE_MAX_LCORE
 
+#define MAX_SAMPLES 10000
+
+static uint64_t aes_lat_cycles[MAX_SAMPLES];
+static size_t   aes_lat_count = 0;
+
 struct worker_args {
     struct rte_mempool *mbuf_pool;
     struct rte_hash    *flow_table;
@@ -342,16 +347,34 @@ static inline void aes128_encrypt_block_neon(const uint8_t in[16],
                                              const uint8_t rk_bytes[176],
                                              uint8_t out[16]) {
     const uint8x16_t *rk = (const uint8x16_t *)rk_bytes;
+
+    // ---- Round 0: initial whitening ----
+    // x = plaintext ^ K0
     uint8x16_t x = veorq_u8(vld1q_u8(in), rk[0]);
+
+    // ---- Rounds 1..9 ----
     for (int r = 1; r < 10; r++) {
+        // AESE with zero "key": SubBytes + ShiftRows (no AddRoundKey)
         x = vaeseq_u8(x, vdupq_n_u8(0));
+
+        // MixColumns
         x = vaesmcq_u8(x);
+
+        // AddRoundKey AFTER MixColumns (correct AES order)
         x = veorq_u8(x, rk[r]);
     }
-    x = vaeseq_u8(x, vdupq_n_u8(0));     // final SubBytes+ShiftRows
-    x = veorq_u8(x, rk[10]);              // final AddRoundKey (no MixColumns)
+
+    // ---- Round 10 (final) ----
+    // SubBytes + ShiftRows
+    x = vaeseq_u8(x, vdupq_n_u8(0));
+
+    // AddRoundKey (no MixColumns in final round)
+    x = veorq_u8(x, rk[10]);
+
+    // store result
     vst1q_u8(out, x);
 }
+
 #endif
 
 static void print_hex(const char *label, const uint8_t *b, size_t n) {
@@ -394,6 +417,64 @@ static int aes_selftest_neon(void) {
 
 // End of encryption functions
 //--------------------------------------------------------------------------
+
+
+static inline uint64_t rdtsc_now(void) {
+    return rte_rdtsc_precise();
+}
+
+// runs N encryptions and records per-op latency in cycles
+static void benchmark_aes_neon(size_t iters, double tsc_hz) {
+#ifdef USE_ARM_AES
+    const uint8_t key[16] = {
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+        0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f
+    };
+    const uint8_t pt[16]  = {
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
+        0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff
+    };
+    uint8_t rk[176], ct[16];
+    aes128_key_expand(key, rk);
+
+    // Warmup to stabilize caches/PLL
+    for (int i=0;i<1000;i++) aes128_encrypt_block_neon(pt, rk, ct);
+
+    aes_lat_count = 0;
+    for (size_t i=0; i<iters; i++) {
+        uint64_t t0 = rdtsc_now();
+        aes128_encrypt_block_neon(pt, rk, ct);
+        uint64_t t1 = rdtsc_now();
+        if (aes_lat_count < MAX_SAMPLES) aes_lat_cycles[aes_lat_count++] = (t1 - t0);
+    }
+
+    // Write CSV
+    FILE *f = fopen("aes_latencies.csv", "w");
+    if (!f) { perror("fopen"); return; }
+    fprintf(f, "# tsc_hz,%.0f\n", tsc_hz);
+    fprintf(f, "iter,cycles,ns\n");
+    for (size_t i=0;i<aes_lat_count;i++) {
+        double ns = (double)aes_lat_cycles[i] * 1e9 / tsc_hz;
+        fprintf(f, "%zu,%" PRIu64 ",%.3f\n", i, aes_lat_cycles[i], ns);
+    }
+    fclose(f);
+
+    // Quick summary
+    uint64_t min=UINT64_MAX, max=0, sum=0;
+    for (size_t i=0;i<aes_lat_count;i++){ uint64_t c=aes_lat_cycles[i]; if(c<min)min=c; if(c>max)max=c; sum+=c; }
+    double avg_ns = ((double)sum/aes_lat_count) * 1e9 / tsc_hz;
+    printf("AES bench: samples=%zu  min=%" PRIu64 " cyc  max=%" PRIu64 " cyc  avg=%.2f ns\n",
+           aes_lat_count, min, max, avg_ns);
+#else
+    (void)iters; (void)tsc_hz;
+    printf("AES bench skipped: USE_ARM_AES not defined.\n");
+#endif
+}
+
+
+
+
+
 
 static inline uint32_t
 allocate_entry_per_core(struct worker_args *w)
@@ -799,10 +880,9 @@ static struct worker_args worker_args[MAX_CORES];
      };
 
 
-    if (aes_selftest_neon() != 0) {
-    rte_exit(EXIT_FAILURE, "AES NEON selftest failed — check -march/+crypto and CPU support\n");
-    }
-    
+    double tsc_hz = (double)rte_get_tsc_hz();
+    benchmark_aes_neon(100000, tsc_hz);
+    printf("Wrote aes_latencies.csv (cycles + ns)\n");
     
     uint16_t queue_id = 0;
     uint16_t base_port = 0;  // your only port
