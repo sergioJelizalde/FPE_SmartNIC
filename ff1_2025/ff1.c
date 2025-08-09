@@ -383,7 +383,7 @@ int main(void){
     uint32_t C[sizeof(X)/sizeof(X[0])];
     uint32_t P2[sizeof(X)/sizeof(X[0])];
 
-    uint64_t hz = rte_get_tsc_hz();
+    const uint64_t hz = rte_get_tsc_hz();
 
     uint64_t t0 = rte_rdtsc_precise();
     if (ff1_encrypt_aes_neon(&params, K, tweak, sizeof(tweak)-1, X, n, C)!=0) {
