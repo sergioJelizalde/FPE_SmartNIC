@@ -432,25 +432,35 @@ static void benchmark_aes_neon(size_t iters, double tsc_hz) {
 
     // start with some PT in regs
     uint8x16_t pt = vdupq_n_u8(0xA5);
+
     // 128-bit counter to mutate PT each iter
-    uint64x2_t ctr = {1, 0x9E3779B97F4A7C15ULL}; // golden-ratio step
+    uint64x2_t ctr = (uint64x2_t){1, 0x9E3779B97F4A7C15ULL}; // golden-ratio step
+
+    // precompute a shuffle table used in warmup to avoid per-iter vld1
+    static const uint8_t shuf_idx_bytes[16] =
+        {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0};
+    const uint8x16_t shuf_idx = vld1q_u8(shuf_idx_bytes);
 
     // warmup
     uint8_t ct_tmp[16];
-    for (int i=0;i<1000;i++) {
+    for (int i=0; i<1000; i++) {
         uint8x16_t ptv = vreinterpretq_u8_u64(
             veorq_u64(vreinterpretq_u64_u8(pt), ctr));
         uint8_t pt_bytes[16];
         vst1q_u8(pt_bytes, ptv);
         aes128_encrypt_block_neon(pt_bytes, rk, ct_tmp);
+
         // advance the counter and rotate/mix a bit
         ctr = vaddq_u64(ctr, (uint64x2_t){1,1});
-        pt = veorq_u8(pt, vqtbl1q_u8(pt, vld1q_u8((uint8_t[16]){1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0})));
+        pt  = veorq_u8(pt, vqtbl1q_u8(pt, shuf_idx));
     }
 
-    // measure per-iteration latency (still affected by loop overhead)
+    // measure per-iteration latency (still includes loop overhead)
     uint64_t *samples = malloc(sizeof(uint64_t) * iters);
     if (!samples) { perror("malloc"); return; }
+
+    // simple sink to prevent DCE
+    uint64_t sink = 0;
 
     for (size_t i=0; i<iters; i++) {
         uint8x16_t ptv = vreinterpretq_u8_u64(
@@ -464,35 +474,43 @@ static void benchmark_aes_neon(size_t iters, double tsc_hz) {
 
         samples[i] = t1 - t0;
 
-        ctr = vaddq_u64(ctr, (uint64x2_t){0x10001,0x9E37});
-        pt  = veorq_u8(pt, vrev64q_u8(pt)); // keep mutating PT in regs
-    }
+        // touch output so compiler can’t drop the call
+        sink ^= ((uint64_t*)ct_tmp)[0] ^ ((uint64_t*)ct_tmp)[1];
 
+        // mutate for next iter
+        ctr = vaddq_u64(ctr, (uint64x2_t){0x10001,0x9E37});
+        pt  = veorq_u8(pt, vrev64q_u8(pt));
+    }
 
     // Write CSV
     FILE *f = fopen("aes_latencies.csv", "w");
-    if (!f) { perror("fopen"); return; }
+    if (!f) { perror("fopen"); free(samples); return; }
     fprintf(f, "# tsc_hz,%.0f\n", tsc_hz);
     fprintf(f, "iter,cycles,ns\n");
-    for (size_t i=0;i<aes_lat_count;i++) {
-        double ns = (double)aes_lat_cycles[i] * 1e9 / tsc_hz;
-        fprintf(f, "%zu,%" PRIu64 ",%.3f\n", i, aes_lat_cycles[i], ns);
+    for (size_t i=0; i<iters; i++) {
+        double ns = (double)samples[i] * 1e9 / tsc_hz;
+        fprintf(f, "%zu,%" PRIu64 ",%.3f\n", i, samples[i], ns);
     }
     fclose(f);
 
     // Quick summary
     uint64_t min=UINT64_MAX, max=0, sum=0;
-    for (size_t i=0;i<aes_lat_count;i++){ uint64_t c=aes_lat_cycles[i]; if(c<min)min=c; if(c>max)max=c; sum+=c; }
-    double avg_ns = ((double)sum/aes_lat_count) * 1e9 / tsc_hz;
-    printf("AES bench: samples=%zu  min=%" PRIu64 " cyc  max=%" PRIu64 " cyc  avg=%.2f ns\n",
-           aes_lat_count, min, max, avg_ns);
+    for (size_t i=0; i<iters; i++) {
+        uint64_t c = samples[i];
+        if (c < min) min = c;
+        if (c > max) max = c;
+        sum += c;
+    }
+    double avg_ns = ((double)sum/iters) * 1e9 / tsc_hz;
+    printf("AES bench: samples=%zu  min=%" PRIu64 " cyc  max=%" PRIu64 " cyc  avg=%.2f ns  (sink=%" PRIu64 ")\n",
+           iters, min, max, avg_ns, sink);
+
+    free(samples);
 #else
     (void)iters; (void)tsc_hz;
     printf("AES bench skipped: USE_ARM_AES not defined.\n");
 #endif
 }
-
-
 
 
 
