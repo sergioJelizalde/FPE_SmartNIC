@@ -426,27 +426,48 @@ static inline uint64_t rdtsc_now(void) {
 // runs N encryptions and records per-op latency in cycles
 static void benchmark_aes_neon(size_t iters, double tsc_hz) {
 #ifdef USE_ARM_AES
-    const uint8_t key[16] = {
-        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
-        0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f
-    };
-    const uint8_t pt[16]  = {
-        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
-        0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff
-    };
-    uint8_t rk[176], ct[16];
+    const uint8_t key[16] = {0};
+    uint8_t rk[176];
     aes128_key_expand(key, rk);
 
-    // Warmup to stabilize caches/PLL
-    for (int i=0;i<1000;i++) aes128_encrypt_block_neon(pt, rk, ct);
+    // start with some PT in regs
+    uint8x16_t pt = vdupq_n_u8(0xA5);
+    // 128-bit counter to mutate PT each iter
+    uint64x2_t ctr = {1, 0x9E3779B97F4A7C15ULL}; // golden-ratio step
 
-    aes_lat_count = 0;
-    for (size_t i=0; i<iters; i++) {
-        uint64_t t0 = rdtsc_now();
-        aes128_encrypt_block_neon(pt, rk, ct);
-        uint64_t t1 = rdtsc_now();
-        if (aes_lat_count < MAX_SAMPLES) aes_lat_cycles[aes_lat_count++] = (t1 - t0);
+    // warmup
+    uint8_t ct_tmp[16];
+    for (int i=0;i<1000;i++) {
+        uint8x16_t ptv = vreinterpretq_u8_u64(
+            veorq_u64(vreinterpretq_u64_u8(pt), ctr));
+        uint8_t pt_bytes[16];
+        vst1q_u8(pt_bytes, ptv);
+        aes128_encrypt_block_neon(pt_bytes, rk, ct_tmp);
+        // advance the counter and rotate/mix a bit
+        ctr = vaddq_u64(ctr, (uint64x2_t){1,1});
+        pt = veorq_u8(pt, vqtbl1q_u8(pt, vld1q_u8((uint8_t[16]){1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0})));
     }
+
+    // measure per-iteration latency (still affected by loop overhead)
+    uint64_t *samples = malloc(sizeof(uint64_t) * iters);
+    if (!samples) { perror("malloc"); return; }
+
+    for (size_t i=0; i<iters; i++) {
+        uint8x16_t ptv = vreinterpretq_u8_u64(
+            veorq_u64(vreinterpretq_u64_u8(pt), ctr));
+        uint8_t pt_bytes[16];
+        vst1q_u8(pt_bytes, ptv);
+
+        uint64_t t0 = rte_rdtsc_precise();
+        aes128_encrypt_block_neon(pt_bytes, rk, ct_tmp);
+        uint64_t t1 = rte_rdtsc_precise();
+
+        samples[i] = t1 - t0;
+
+        ctr = vaddq_u64(ctr, (uint64x2_t){0x10001,0x9E37});
+        pt  = veorq_u8(pt, vrev64q_u8(pt)); // keep mutating PT in regs
+    }
+
 
     // Write CSV
     FILE *f = fopen("aes_latencies.csv", "w");
