@@ -3,7 +3,7 @@
 // Encrypt + Decrypt; AES-128 via ARMv8 AES/NEON.
 // Build: clang -O3 -march=armv8-a+crypto -std=c11 ff1_aes_neon.c -o ff1
 
-#include <stdint.h>
+
 #include <sys/types.h>  // for ssize_t
 #include <alloca.h>     // for alloca()
 #include <stdlib.h>
@@ -365,10 +365,11 @@ int ff1_decrypt_aes_neon(const ff1_params *P,
 }
 
 // ---------------- demo / quick check ---------------------------------------
-#ifdef TEST_FF1
+
 static void print_digits(const uint32_t *X, uint32_t n){
     for(uint32_t i=0;i<n;i++) printf("%u", X[i]); puts("");
 }
+
 int main(void){
     ff1_params params = {.radix=10, .minlen=6, .maxlen=64, .maxTlen=64};
     uint8_t K[16]={0};
@@ -398,4 +399,3 @@ int main(void){
     printf("PT' : "); print_digits(P2,n);
     return 0;
 }
-#endif
