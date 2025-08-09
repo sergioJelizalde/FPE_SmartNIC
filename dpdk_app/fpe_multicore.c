@@ -831,12 +831,6 @@ static struct worker_args worker_args[MAX_CORES];
      if (ret < 0)
          rte_panic("Cannot init EAL\n");
 
-
-
-     uint64_t tsc_hz = rte_get_tsc_hz();
-    printf("TSC frequency: %lu Hz (%.2f GHz)\n",
-           tsc_hz, tsc_hz / 1e9);
-
     printf("DPDK version: %s\n", rte_version());
 
     unsigned total_lcores = rte_lcore_count();
