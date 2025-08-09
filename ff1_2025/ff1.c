@@ -375,6 +375,11 @@ static void print_digits(const uint32_t *X, uint32_t n){
 }
 
 int main(void){
+
+     if (rte_eal_init(argc, argv) < 0)
+        rte_exit(EXIT_FAILURE, "EAL init failed\n");
+
+        
     ff1_params params = {.radix=10, .minlen=6, .maxlen=64, .maxTlen=64};
     uint8_t K[16]={0};
     const uint8_t tweak[]="demo";
